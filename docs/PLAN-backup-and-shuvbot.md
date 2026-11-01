@@ -136,6 +136,26 @@ Plannotator session 2 (annotated, 4/5 answered): presets (Q1 unanswered; implied
 - **shuvbot nuke**: snapshot `~/.local/share/skills-manager-cutover/shuvbot-pre-cutover-20261031.tar` (5,021 entries, symlinks dereferenced; copy on shuvdev). Removed all agent skills dirs' contents (kept `~/.codex/skills/.system`, Claude's sync `manifest.json`), `~/.hermes` entirely (per review: Hermes no longer in use), and 31 stub dotdirs (`stub-dotdirs-removed-20261031.txt`).
 - **shuvbot restore**: `git clone` → 431 skills, 7 presets; custom agents `shared-agents` and `claude-synced-a96c090e` re-added; presets deployed → 47 / 23 / 18 / codex 2 / opencode 2 / cursor 1 / pi 1. Connected agents: 7 (claude_code, codex, cursor, opencode, pi + 2 custom; grok/antigravity are not installed on shuvbot). Every skills-dir entry is a managed symlink. Both devices: `main`, clean, ahead 0 / behind 0.
 
+## Follow-up — git sources for tool-written skills (2026-10-31 PDT)
+
+Library entries that an external tool can overwrite were re-pointed at their upstream repos with `skills set-source` (ids, tags, preset membership and deployments kept). 25 entries, all now `source_type: git`; `skills check` reports `up_to_date`.
+
+| Entries | Source | Why |
+|---|---|---|
+| `plannotator`, `-annotate`, `-inbox`, `-last`, `-review` | `backnotprop/plannotator` `apps/skills/core/<n>` | Plannotator's self-update rewrites agent skill dirs |
+| `plannotator-{annotate,inbox,last,review}-claude` | … `apps/skills/claude/<n>` | |
+| `plannotator-compound`, `-setup-goal`, `-visual-explainer` | … `apps/skills/extra/<n>` | |
+| `shuvgeist` | `shuv1337/shuvgeist` `skills/shuvgeist` | CLI auto-installs into `~/.agents/skills` on every run; cpSync refuses to replace the managed symlink and the per-run path swallows the error, so the link wins. Re-added to `shared-agents`. |
+| `impeccable`, `impeccable-claude` | `pbakaus/impeccable` `.agents/skills/impeccable` / `.claude/skills/impeccable` | `npx impeccable` writes agent dirs. Dropped the 22 MB `scripts/bin/linux-x64/impeccable` cache; the launcher re-fetches (checksummed). |
+| `visual-explainer` | `nicobailon/visual-explainer` `plugins/visual-explainer` | was tracked by `npx skills` lock |
+| `playwriter`, `quota-axi`, `anatomy`, `anatomy-claude` | `remorses/playwriter`, `kunchenguid/quota-axi`, `wheresryan22/anatomy` (root) | clear upstreams |
+| `diagnosing-bugs`, `grill-me`, `grill-with-docs` | `mattpocock/skills` | sources recovered from shuvbot's `.skill-lock.json` |
+| `cloudflare-one`, `cloudflare-one-migrations` | `cloudflare/skills` | same |
+
+All content diffs were upstream-newer; pre-change library copies are in `~/.local/share/skills-manager-cutover/pre-setsource-20261031.tar`. `~/.agents/.skill-lock.json` retired on both hosts (shuvbot's copy kept at `skill-lock-retired-20261031.json`) so `npx skills` no longer claims them.
+
+Left `local` on purpose: `open-edit` (library copy carries `hooks/` + `scripts/preflight.sh` that upstream `veedstudio/open-edit` no longer ships), the 7 retired hyperframes workflow skills, and the shuvskills-authored skills (`discord-release-notify`, `shuv-fork-it`, `using-exe-dev`, `androidtv-control`, `clankstudio-*`, `wtfm`, `executor-v2`, `shark`, `tldraw-offline`), whose canonical home is now this backup. Claude's `synced/` folder is Claude-owned and was not touched.
+
 ## Rollback
 
 - shuvskills: `archive/catalog-2026-10-30` branch + tag; restoring old `main` is `git push origin archive/catalog-2026-10-30:main` + default-branch flip.
