@@ -2,7 +2,7 @@ use anyhow::{bail, Context, Result};
 use rusqlite::Connection;
 
 /// Current schema version. Bump this when adding a new migration.
-const LATEST_VERSION: u32 = 8;
+const LATEST_VERSION: u32 = 9;
 
 /// Run all pending migrations on the database.
 ///
@@ -55,6 +55,7 @@ fn migrate_step(conn: &Connection, from_version: u32) -> Result<()> {
         5 => migrate_v5_to_v6(conn),
         6 => migrate_v6_to_v7(conn),
         7 => migrate_v7_to_v8(conn),
+        8 => add_column_if_missing(conn, "skills", "installed_content_hash", "TEXT"),
         _ => bail!("unknown migration version: {from_version}"),
     }
 }
@@ -360,6 +361,15 @@ fn has_column(conn: &Connection, table: &str, column: &str) -> Result<bool> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn v8_does_not_invent_an_install_baseline_for_existing_content() {
+        let conn = Connection::open_in_memory().unwrap();
+        conn.execute_batch("CREATE TABLE skills (id TEXT PRIMARY KEY, content_hash TEXT); INSERT INTO skills VALUES ('old', 'observed-hash'); PRAGMA user_version = 8;").unwrap();
+        run_migrations(&conn).unwrap();
+        let row: (String, Option<String>) = conn.query_row("SELECT content_hash, installed_content_hash FROM skills", [], |r| Ok((r.get(0)?, r.get(1)?))).unwrap();
+        assert_eq!(row, ("observed-hash".into(), None));
+    }
 
     #[test]
     fn test_fresh_database_migrates_to_latest() {

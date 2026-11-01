@@ -36,3 +36,7 @@ pub mod timing;
 pub mod tool_adapters;
 pub mod tool_service;
 pub mod well_known;
+
+pub mod catalog_import;
+
+pub mod package_files;

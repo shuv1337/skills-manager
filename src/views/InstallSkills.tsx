@@ -1,3 +1,4 @@
+import { CatalogImport } from "../components/CatalogImport";
 import { useState, useEffect, useLayoutEffect, useCallback, useRef, useMemo, useDeferredValue } from "react";
 import {
   DownloadCloud,
@@ -1207,6 +1208,7 @@ export function InstallSkills() {
 
       {activeTab === "local" && (
         <div className="space-y-4 pb-8 animate-in fade-in duration-300">
+          <CatalogImport onImported={refreshManagedSkills} />
           <section className="app-panel overflow-hidden">
             <div className="border-b border-border-subtle px-4 py-3.5">
               <div className="flex flex-col gap-4 lg:flex-row lg:items-center lg:justify-between">

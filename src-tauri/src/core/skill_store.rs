@@ -141,9 +141,9 @@ impl SkillStore {
             "INSERT INTO skills (
                 id, name, description, source_type, source_ref, source_ref_resolved, source_subpath,
                 source_branch, source_revision, remote_revision, central_path, content_hash, enabled,
-                created_at, updated_at, status, update_status, last_checked_at, last_check_error
+                created_at, updated_at, status, update_status, last_checked_at, last_check_error, installed_content_hash
              )
-             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15, ?16, ?17, ?18, ?19)",
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15, ?16, ?17, ?18, ?19, ?12)",
             params![
                 skill.id,
                 skill.name,
@@ -363,7 +363,7 @@ impl SkillStore {
         let now = chrono::Utc::now().timestamp_millis();
         conn.execute(
             "UPDATE skills
-             SET name = ?1, description = ?2, source_revision = ?3, remote_revision = ?4, content_hash = ?5,
+             SET name = ?1, description = ?2, source_revision = ?3, remote_revision = ?4, content_hash = ?5, installed_content_hash = ?5,
                  updated_at = ?6, update_status = ?7, last_checked_at = ?6, last_check_error = NULL
              WHERE id = ?8",
             params![
@@ -378,6 +378,12 @@ impl SkillStore {
             ],
         )?;
         Ok(())
+    }
+
+    /// Last successful installation, kept separate from the reindexed working tree hash.
+    pub fn installed_content_hash(&self, id: &str) -> Result<Option<String>> {
+        let conn = self.conn.lock().unwrap();
+        Ok(conn.query_row("SELECT installed_content_hash FROM skills WHERE id = ?1", params![id], |row| row.get(0))?)
     }
 
     pub fn update_skill_source_ref(&self, id: &str, source_ref: &str) -> Result<()> {
@@ -411,7 +417,7 @@ impl SkillStore {
             "UPDATE skills
              SET name = ?1, description = ?2, source_type = ?3, source_ref = ?4, source_ref_resolved = ?5,
                  source_subpath = ?6, source_branch = ?7, source_revision = ?8, remote_revision = ?9,
-                 content_hash = ?10, updated_at = ?11, status = 'ok', update_status = ?12, last_checked_at = ?11,
+                 content_hash = ?10, installed_content_hash = ?10, updated_at = ?11, status = 'ok', update_status = ?12, last_checked_at = ?11,
                  last_check_error = NULL
              WHERE id = ?13",
             params![

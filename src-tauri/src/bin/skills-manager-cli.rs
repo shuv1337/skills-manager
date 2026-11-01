@@ -90,6 +90,14 @@ struct SkillsArgs {
 
 #[derive(Subcommand, Debug)]
 enum SkillsCommand {
+    /// Preview a categorized catalog; --apply imports only explicitly selected sources, without deployment.
+    ImportCatalog {
+        root: PathBuf,
+        #[arg(long)] category: Option<String>,
+        #[arg(long)] exclude: Vec<String>,
+        #[arg(long)] select: Vec<String>,
+        #[arg(long)] apply: bool,
+    },
     List {
         #[arg(long)]
         query: Option<String>,
@@ -166,6 +174,9 @@ enum SkillsCommand {
     },
     /// Deploy library skills to one or more agents' global skill directories.
     Deploy {
+        /// Preserve an existing folder name for one skill and one agent (for source variants).
+        #[arg(long)]
+        target_name: Option<String>,
         #[arg(required = true)]
         references: Vec<String>,
         #[arg(long = "agent", alias = "to", value_name = "AGENT", required = true)]
@@ -886,6 +897,15 @@ fn run_skills(args: SkillsArgs, store: &SkillStore, json: bool) -> anyhow::Resul
                 json,
             );
         }
+        SkillsCommand::ImportCatalog { root, category, exclude, select, apply } => {
+            let entries = if apply {
+                if select.is_empty() { bail!("--apply requires at least one --select canonical source path"); }
+                app_lib::core::catalog_import::apply(store, &root, category.as_deref(), &exclude, &select)?
+            } else {
+                app_lib::core::catalog_import::preview(store, &root, category.as_deref(), &exclude)?
+            };
+            print_json(&entries, json);
+        }
         SkillsCommand::Install {
             reference,
             local,
@@ -938,9 +958,18 @@ fn run_skills(args: SkillsArgs, store: &SkillStore, json: bool) -> anyhow::Resul
             references,
             agents,
             dry_run,
+            target_name,
         } => {
-            let report = run_skill_deployment(store, &references, &agents, true, dry_run)?;
-            print_json(&report, json);
+            if let Some(name) = target_name {
+                if references.len() != 1 || agents.len() != 1 {
+                    bail!("--target-name requires exactly one skill and one agent");
+                }
+                let report = deploy_skill_as(store, &references[0], &agents[0], &name, dry_run)?;
+                print_json(&report, json);
+            } else {
+                let report = run_skill_deployment(store, &references, &agents, true, dry_run)?;
+                print_json(&report, json);
+            }
         }
         SkillsCommand::Undeploy {
             references,
@@ -1202,6 +1231,38 @@ fn resolve_skill_references(
         }
     }
     Ok(skills)
+}
+
+fn deploy_skill_as(store: &SkillStore, reference: &str, agent: &str, name: &str, dry_run: bool) -> anyhow::Result<serde_json::Value> {
+    if skill_metadata::sanitize_skill_name(name).as_deref() != Some(name) {
+        bail!("Target name must be a single valid skill folder name");
+    }
+    let _lock = RepoLock::acquire_foreground("deploy named skill target")?;
+    let skill = resolve_skill(store, reference)?;
+    select_preset_agents(store, &[agent.to_owned()], true)?;
+    let adapter = app_lib::core::tool_adapters::find_adapter_with_store(store, agent)
+        .ok_or_else(|| anyhow!("Unknown agent: {agent}"))?;
+    let target = adapter.skills_dir().join(name);
+    let old = store.get_all_targets()?;
+    if old.iter().any(|t| t.skill_id == skill.id && t.tool == agent && Path::new(&t.target_path) != target) {
+        bail!("Skill is already deployed at another path; undeploy it before choosing a new target name");
+    }
+    let desired = scenario_service::ScenarioSyncTarget {
+        skill_id: skill.id.clone(), skill_name: skill.name.clone(), tool: agent.to_owned(),
+        source: PathBuf::from(&skill.central_path), target: target.clone(),
+        mode: sync_engine::sync_mode_for_tool(agent, store.get_setting("sync_mode")?.as_deref()),
+        source_hash: skill.content_hash.clone(),
+    };
+    scenario_service::preflight_scenario_sync_targets(store, std::slice::from_ref(&desired)).map_err(map_app_err)?;
+    if !dry_run {
+        let refusals = scenario_service::sync_desired_targets(store, &[desired]).map_err(map_app_err)?;
+        scenario_service::refusals_to_error(refusals).map_err(map_app_err)?;
+        let check = verify_deployment_state(store, &[skill.id.clone()], &[agent.to_owned()], true, &old)?;
+        if !check.failures.is_empty() { bail!("Deployment verification failed: {}", check.failures.join("; ")); }
+        drop(_lock);
+        sync_metadata::write_all_from_db(store)?;
+    }
+    Ok(serde_json::json!({"ok":true,"skill_id":skill.id,"agent":agent,"target_path":target,"dry_run":dry_run}))
 }
 
 fn run_skill_deployment(

@@ -88,7 +88,7 @@ enum UpdateOutcome {
 /// it, which loses files just as effectively, so they are always checked.
 ///
 /// Compared against the *staged* tree rather than the source it came from: the
-/// installer drops `.git` and every symlink, so anything else would report a
+/// installer excludes root `.git` metadata, so anything else would report a
 /// path as surviving that the swap goes on to remove.
 pub(crate) fn pending_removals_for(
     store: &SkillStore,
@@ -530,7 +530,7 @@ fn build_source_diff_entries(
     for key in keys {
         match (original.get(key), updated.get(key)) {
             (None, Some(u)) => {
-                let (kind, text) = classify_diff_bytes(std::fs::read(&u.path).ok());
+                let (kind, text) = classify_diff_bytes(content_hash::read_content_entry(&u.path).ok());
                 entries.push(SkillSourceDiffEntryDto {
                     relative_path: key.clone(),
                     status: "added".into(),
@@ -542,7 +542,7 @@ fn build_source_diff_entries(
                 });
             }
             (Some(o), None) => {
-                let (kind, text) = classify_diff_bytes(std::fs::read(&o.path).ok());
+                let (kind, text) = classify_diff_bytes(content_hash::read_content_entry(&o.path).ok());
                 entries.push(SkillSourceDiffEntryDto {
                     relative_path: key.clone(),
                     status: "removed".into(),
@@ -554,8 +554,8 @@ fn build_source_diff_entries(
                 });
             }
             (Some(o), Some(u)) => {
-                let o_bytes = std::fs::read(&o.path).ok();
-                let u_bytes = std::fs::read(&u.path).ok();
+                let o_bytes = content_hash::read_content_entry(&o.path).ok();
+                let u_bytes = content_hash::read_content_entry(&u.path).ok();
                 let exec_before = o.is_executable();
                 let exec_after = u.is_executable();
                 let bytes_equal = o_bytes.is_some() && o_bytes == u_bytes;
@@ -2087,6 +2087,37 @@ pub fn managed_skill_by_id(
     Ok(managed_skill_to_dto(store, skill, &all_targets, &tags_map))
 }
 
+/// Keep the install baseline distinct from the reindexed working tree hash.
+/// An approved removal permits just those paths, not edits at surviving paths.
+fn refuse_modified_tree(baseline: Option<&str>, current: &Path, replacement: &Path, approved: &[&str]) -> Result<(), AppError> {
+    use crate::core::content_hash;
+    if !current.exists() { return Ok(()); }
+    let entries = content_hash::list_content_files_strict(current).map_err(AppError::io)?;
+    let current_hash = content_hash::hash_entries(&entries);
+    let incoming = content_hash::hash_directory(replacement).map_err(AppError::io)?;
+    if baseline == Some(current_hash.as_str()) || current_hash == incoming { return Ok(()); }
+    let surviving: Vec<_> = entries.into_iter().filter(|entry| !approved.iter().any(|p| {
+        entry.relative_path == *p || (p.ends_with('/') && entry.relative_path.starts_with(*p))
+    })).collect();
+    if !approved.is_empty() && content_hash::hash_entries(&surviving) == incoming { return Ok(()); }
+    Err(AppError::invalid_input(format!(
+        "Local library changes would be overwritten at {}. Export or reconcile those changes before updating this skill (or establish a baseline by explicitly reimporting a legacy skill).", current.display()
+    )))
+}
+
+fn refuse_modified_replacements(store: &SkillStore, skill: &SkillRecord, replacement: &Path, pending: &[PendingRemoval]) -> Result<(), AppError> {
+    let baseline = store.installed_content_hash(&skill.id).map_err(AppError::db)?;
+    let approved: Vec<_> = pending.iter().filter(|p| p.location == LIBRARY_LOCATION).map(|p| p.path.as_str()).collect();
+    refuse_modified_tree(baseline.as_deref(), Path::new(&skill.central_path), replacement, &approved)?;
+    for target in store.get_targets_for_skill(&skill.id).map_err(AppError::db)? {
+        if target.mode == "copy" {
+            let approved: Vec<_> = pending.iter().filter(|p| p.location == target.tool).map(|p| p.path.as_str()).collect();
+            refuse_modified_tree(target.source_hash.as_deref(), Path::new(&target.target_path), replacement, &approved)?;
+        }
+    }
+    Ok(())
+}
+
 /// Update an installed git-sourced skill.
 ///
 /// `approved_removals` carries back the token from a previous call that
@@ -2161,8 +2192,7 @@ pub fn update_git_skill_internal(
         let _lock = RepoLock::acquire_foreground("update installed skill").map_err(AppError::db)?;
 
         // Stage first, then compare. The tree that lands in the library is the
-        // installer's output, not the raw checkout — it drops `.git` and every
-        // symlink — so comparing against the checkout would report a path as
+        // installer's output, not the raw checkout — it excludes root `.git` metadata — so comparing against the checkout would report a path as
         // surviving that the swap then removes.
         let staged_path = staged_path_for(&skill.central_path);
         let install_result = if content_changed {
@@ -2207,6 +2237,7 @@ pub fn update_git_skill_internal(
             return Ok(UpdateOutcome::Held { pending, approval });
         }
 
+        refuse_modified_replacements(store, &skill, if install_result.is_some() { &staged_path } else { Path::new(&skill.central_path) }, &pending)?;
         if let Some(install_result) = install_result {
             swap_skill_directory(&staged_path, Path::new(&skill.central_path))?;
             // Only now is it the library's. Releasing before the swap left the
@@ -2414,7 +2445,8 @@ pub fn set_git_source_internal(
 
         let new_hash =
             crate::core::content_hash::hash_directory(&skill_dir).map_err(AppError::io)?;
-        let content_changed = skill.content_hash.as_deref() != Some(new_hash.as_str());
+        let current_hash = crate::core::content_hash::hash_directory(Path::new(&skill.central_path)).map_err(AppError::io)?;
+        let content_changed = current_hash != new_hash;
 
         // Report before refusing: inspecting a skill whose content differs is
         // exactly what --dry-run is for, so it must not need --force to run.
@@ -2610,6 +2642,7 @@ pub fn reimport_local_skill_internal(
             return Ok((pending, Some(approval)));
         }
 
+        refuse_modified_replacements(store, &skill, &staged_path, &pending)?;
         swap_skill_directory(&staged_path, Path::new(&skill.central_path))?;
         // Only now is it the library's; before this the guard still owns it.
         staged_guard.release();
@@ -3553,6 +3586,38 @@ mod tests {
             last_checked_at: None,
             last_check_error: None,
         }
+    }
+
+    #[test]
+    fn copy_refresh_refuses_surviving_edits_even_with_a_removal_approval() {
+        let tmp = tempfile::tempdir().unwrap();
+        let current = tmp.path().join("copy"); let new = tmp.path().join("new");
+        fs::create_dir_all(&current).unwrap(); fs::create_dir_all(&new).unwrap();
+        fs::write(current.join("SKILL.md"), "original").unwrap();
+        let baseline = crate::core::content_hash::hash_directory(&current).unwrap();
+        fs::write(current.join("SKILL.md"), "local edit").unwrap();
+        fs::write(current.join("removed.txt"), "approved removal").unwrap();
+        fs::write(new.join("SKILL.md"), "upstream").unwrap();
+        assert!(refuse_modified_tree(Some(&baseline), &current, &new, &["removed.txt"]).is_err());
+        assert_eq!(fs::read_to_string(current.join("SKILL.md")).unwrap(), "local edit");
+    }
+
+    #[test]
+    fn source_reimport_refuses_same_path_local_edit() {
+        let repo = test_repo();
+        let central = write_skill_dir("protected");
+        let source = repo._tmp.path().join("source");
+        fs::create_dir_all(&source).unwrap();
+        fs::write(source.join("SKILL.md"), "---\nname: protected\n---\nupstream").unwrap();
+        let mut skill = sample_skill("protected-id", "protected", &central);
+        skill.source_type = "local".into();
+        skill.source_ref = Some(source.to_string_lossy().into());
+        skill.content_hash = Some(crate::core::content_hash::hash_directory(&central).unwrap());
+        repo.store.insert_skill(&skill).unwrap();
+        fs::write(central.join("SKILL.md"), "local work").unwrap();
+        let err = reimport_local_skill_internal(&repo.store, "protected-id", None).unwrap_err();
+        assert!(err.message.contains("Local library changes"));
+        assert_eq!(fs::read_to_string(central.join("SKILL.md")).unwrap(), "local work");
     }
 
     #[test]
@@ -4742,4 +4807,15 @@ mod tests {
         assert_eq!(installed.name, "lark-doc-2");
         assert_eq!(fs::read_to_string(stray.join("notes.md")).unwrap(), "mine");
     }
+}
+
+#[tauri::command]
+pub async fn import_catalog(root: String, category: Option<String>, excluded: Vec<String>, selected: Option<Vec<String>>, store: State<'_, Arc<SkillStore>>) -> Result<Vec<crate::core::catalog_import::CatalogEntry>, AppError> {
+    let store = store.inner().clone();
+    tauri::async_runtime::spawn_blocking(move || {
+        match selected {
+            Some(paths) => crate::core::catalog_import::apply(&store, Path::new(&root), category.as_deref(), &excluded, &paths),
+            None => crate::core::catalog_import::preview(&store, Path::new(&root), category.as_deref(), &excluded),
+        }.map_err(AppError::io)
+    }).await?
 }

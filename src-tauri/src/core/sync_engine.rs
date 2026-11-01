@@ -317,6 +317,7 @@ pub fn sync_skill(
     }
 
     ensure_dst_not_inside_src(source, target)?;
+    crate::core::package_files::validate(source)?;
 
     // Remove exactly what we classified. Passing `state` keeps a directory
     // that appeared since the check from being swallowed by `remove_dir_all`:
@@ -614,22 +615,7 @@ pub fn remove_target(target: &Path) -> Result<()> {
 }
 
 fn copy_dir_recursive(src: &Path, dst: &Path) -> Result<()> {
-    std::fs::create_dir_all(dst)?;
-    for entry in std::fs::read_dir(src)? {
-        let entry = entry?;
-        let ft = entry.file_type()?;
-        let dest_path = dst.join(entry.file_name());
-        if ft.is_dir() {
-            let name = entry.file_name();
-            if name == ".git" {
-                continue;
-            }
-            copy_dir_recursive(&entry.path(), &dest_path)?;
-        } else {
-            std::fs::copy(entry.path(), &dest_path)?;
-        }
-    }
-    Ok(())
+    crate::core::package_files::copy(src, dst)
 }
 
 #[cfg(test)]

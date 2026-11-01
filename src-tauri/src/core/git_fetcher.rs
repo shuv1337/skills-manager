@@ -814,9 +814,8 @@ fn detach_from_promisor(repo_dir: &Path) {
     }
 }
 
-/// Recursive copy that skips symlinks, so it can never follow a link out of the
-/// cache. Nothing downstream misses them: the installer drops symlinks, and
-/// `content_hash` counts only regular files.
+/// Recursive copy that preserves symlinks literally without following them.
+/// The installer validates links within the selected package before deployment.
 fn copy_dir_contents(src: &Path, dst: &Path, cancel: Option<&Arc<AtomicBool>>) -> Result<()> {
     if cancel.is_some_and(|c| c.load(Ordering::SeqCst)) {
         bail!("Installation cancelled");
@@ -826,6 +825,17 @@ fn copy_dir_contents(src: &Path, dst: &Path, cancel: Option<&Arc<AtomicBool>>) -
         let entry = entry?;
         let file_type = entry.file_type()?;
         if file_type.is_symlink() {
+            let link = std::fs::read_link(entry.path())?;
+            #[cfg(unix)]
+            std::os::unix::fs::symlink(link, dst.join(entry.file_name()))?;
+            #[cfg(windows)]
+            if entry.path().is_dir() {
+                std::os::windows::fs::symlink_dir(link, dst.join(entry.file_name()))?;
+            } else {
+                std::os::windows::fs::symlink_file(link, dst.join(entry.file_name()))?;
+            }
+            #[cfg(not(any(unix, windows)))]
+            bail!("Preserving Git package links is unsupported on this platform");
             continue;
         }
         let target = dst.join(entry.file_name());
@@ -2430,7 +2440,7 @@ mod tests {
 
     #[cfg(unix)]
     #[test]
-    fn copy_dir_contents_skips_symlinks_instead_of_following_them_out() {
+    fn copy_dir_contents_preserves_links_without_following_them_out() {
         let tmp = tempdir().unwrap();
         let outside = tmp.path().join("outside");
         fs::create_dir_all(&outside).unwrap();
@@ -2445,10 +2455,8 @@ mod tests {
         copy_dir_contents(&src, &dst, None).unwrap();
 
         assert!(dst.join("kept.txt").exists());
-        assert!(
-            !dst.join("escape").exists(),
-            "a symlink out of the cache must not be followed into the checkout"
-        );
+        assert!(dst.join("escape").is_symlink());
+        assert_eq!(std::fs::read_link(dst.join("escape")).unwrap(), outside);
     }
 
     #[test]

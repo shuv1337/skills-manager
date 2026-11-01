@@ -4,7 +4,7 @@ use std::borrow::Cow;
 use std::path::{Path, PathBuf};
 use walkdir::WalkDir;
 
-const IGNORED: &[&str] = &[".git", ".DS_Store", "Thumbs.db", ".gitignore", "__pycache__"];
+const IGNORED: &[&str] = &[ ".DS_Store", "Thumbs.db", ".gitignore", "__pycache__"];
 
 /// True for names excluded from a skill's content scope: the exact-match
 /// [`IGNORED`] entries plus compiled-Python artifacts (`*.pyc`). These are
@@ -81,14 +81,14 @@ fn walk_content_files(dir: &Path, strict: bool, skip_deps: bool) -> Result<Vec<C
     let mut entries = Vec::new();
     for result in WalkDir::new(dir).into_iter().filter_entry(|e| {
         let name = e.file_name().to_string_lossy();
-        !is_ignored(&name)
+        !(e.depth() == 1 && name == ".git") && !is_ignored(&name)
             && !(skip_deps
                 && e.depth() > 0
                 && e.file_type().is_dir()
                 && DEPENDENCY_DIRS.contains(&name.as_ref()))
     }) {
         match result {
-            Ok(entry) if entry.file_type().is_file() => entries.push(entry),
+            Ok(entry) if entry.depth() > 0 && (entry.file_type().is_file() || entry.file_type().is_symlink()) => entries.push(entry),
             Ok(_) => {}
             Err(err) if strict => {
                 return Err(
@@ -117,7 +117,7 @@ fn walk_content_files(dir: &Path, strict: bool, skip_deps: bool) -> Result<Vec<C
             // is a legal filename character on unix.
             #[cfg(windows)]
             let relative_path = relative_path.replace('\\', "/");
-            let exec_bits = exec_bits_of(entry.path());
+            let exec_bits = if entry.file_type().is_symlink() { None } else { exec_bits_of(entry.path()) };
             // Reuse WalkDir's already-fetched metadata for the mtime: no extra
             // stat, and no separate recursive walk to answer "last modified?".
             let modified_ms = entry
@@ -144,7 +144,10 @@ pub fn hash_entries(entries: &[ContentEntry]) -> String {
     let mut hasher = Sha256::new();
     for entry in entries {
         hasher.update(entry.relative_path.as_bytes());
-        if let Ok(content) = std::fs::read(&entry.path) {
+        if let Ok(target) = std::fs::read_link(&entry.path) {
+            hasher.update(b"\0symlink\0");
+            hasher.update(target.as_os_str().as_encoded_bytes());
+        } else if let Ok(content) = std::fs::read(&entry.path) {
             hasher.update(&content);
         }
         // Include executable bit so permission-only changes are detected.
@@ -250,9 +253,9 @@ pub fn hash_entries_eol_insensitive(entries: &[ContentEntry]) -> Result<String> 
         let path = entry.relative_path.as_bytes();
         hasher.update((path.len() as u64).to_le_bytes());
         hasher.update(path);
-        let content = std::fs::read(&entry.path)
+        let content = read_content_entry(&entry.path)
             .with_context(|| format!("failed to read {}", entry.path.display()))?;
-        let folded = fold_crlf(&content);
+        let folded = if entry.path.is_symlink() { Cow::Borrowed(content.as_slice()) } else { fold_crlf(&content) };
         hasher.update((folded.len() as u64).to_le_bytes());
         hasher.update(folded.as_ref());
         // Kept in step with `hash_entries`: a permission-only change is still
@@ -293,6 +296,24 @@ mod tests {
 
     /// #502: the update tiebreaker looks past dependency installs, while the
     /// stored-identity hash keeps seeing them.
+    #[cfg(unix)]
+    #[test]
+    fn hashes_link_targets_and_nested_git_fixture_content() {
+        let tmp = tempfile::tempdir().unwrap();
+        fs::write(tmp.path().join("SKILL.md"), "body").unwrap();
+        std::os::unix::fs::symlink("SKILL.md", tmp.path().join("alias")).unwrap();
+        let first = hash_directory(tmp.path()).unwrap();
+        fs::remove_file(tmp.path().join("alias")).unwrap();
+        std::os::unix::fs::symlink("other.md", tmp.path().join("alias")).unwrap();
+        assert_ne!(hash_directory(tmp.path()).unwrap(), first);
+        fs::create_dir_all(tmp.path().join("fixture/.git")).unwrap();
+        fs::write(tmp.path().join("fixture/.git/config"), "one").unwrap();
+        let before = hash_directory(tmp.path()).unwrap();
+        fs::write(tmp.path().join("fixture/.git/config"), "two").unwrap();
+        assert_ne!(hash_directory(tmp.path()).unwrap(), before);
+        assert_eq!(read_content_entry(&tmp.path().join("alias")).unwrap(), b"symlink -> other.md");
+    }
+
     #[test]
     fn dependency_installs_only_bypass_the_update_tiebreaker() {
         let tmp = tempdir().unwrap();
@@ -750,4 +771,13 @@ mod tests {
         assert!(by_name("run.sh").is_executable());
         assert!(!by_name("plain.txt").is_executable());
     }
+}
+
+/// Diff links as their literal targets, never as the contents they point to.
+pub fn read_content_entry(path: &Path) -> std::io::Result<Vec<u8>> {
+    if path.symlink_metadata()?.file_type().is_symlink() {
+        let mut value = b"symlink -> ".to_vec();
+        value.extend_from_slice(std::fs::read_link(path)?.as_os_str().as_encoded_bytes());
+        Ok(value)
+    } else { std::fs::read(path) }
 }

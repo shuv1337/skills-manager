@@ -152,6 +152,9 @@ pub fn install_skill_dir_to_destination(
     name: &str,
     destination: &Path,
 ) -> Result<InstallResult> {
+    if !skill_metadata::is_valid_skill_dir(source) {
+        bail!("Not a skill package: {} (missing SKILL.md)", source.display());
+    }
     let meta = skill_metadata::parse_skill_md(source);
 
     // A local skill can be a symlink back to this exact central directory
@@ -180,6 +183,7 @@ pub fn install_skill_dir_to_destination(
     }
 
     sync_engine::ensure_dst_not_inside_src(source, destination)?;
+    super::package_files::validate(source)?;
 
     if destination.exists() {
         std::fs::remove_dir_all(destination)
@@ -272,30 +276,7 @@ fn unique_skill_dest(parent: &Path, sanitized_name: &str, source: &Path) -> Resu
 }
 
 fn copy_skill_dir(src: &Path, dst: &Path) -> Result<()> {
-    std::fs::create_dir_all(dst)?;
-    for entry in std::fs::read_dir(src)? {
-        let entry = entry?;
-        let ft = entry.file_type()?;
-        let name = entry.file_name();
-        let name_str = name.to_string_lossy();
-
-        if name_str == ".git" || name_str == ".DS_Store" {
-            continue;
-        }
-
-        // Skip symlinks to prevent exfiltration of files outside the skill directory
-        if ft.is_symlink() {
-            continue;
-        }
-
-        let dest_path = dst.join(&name);
-        if ft.is_dir() {
-            copy_skill_dir(&entry.path(), &dest_path)?;
-        } else {
-            std::fs::copy(entry.path(), &dest_path)?;
-        }
-    }
-    Ok(())
+    super::package_files::copy(src, dst)
 }
 
 #[cfg(test)]

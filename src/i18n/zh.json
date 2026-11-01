@@ -1131,5 +1131,21 @@
       "deletedLocalBatch": "已删除 {{count}} 个本地 Skill",
       "deleteLocalBatchFailed": "{{count}} 个本地 Skill 删除失败"
     }
+  },
+  "catalog": {
+    "title": "Import a skill catalog",
+    "description": "Preview packages and import selected skills into your library. Categories become optional tags. No agents are deployed.",
+    "root": "Catalog or single-skill folder",
+    "browse": "Choose folder",
+    "category": "Category override (optional)",
+    "exclude": "Excluded folder names (comma-separated)",
+    "preview": "Preview catalog",
+    "selectAll": "Select all available packages",
+    "untagged": "Untagged",
+    "existing": "Already imported; content and tags will be kept",
+    "import": "Import selected ({{count}})",
+    "working": "Reading catalog…",
+    "done": "Import complete. Review your library before deploying.",
+    "failed": "Catalog import failed"
   }
 }

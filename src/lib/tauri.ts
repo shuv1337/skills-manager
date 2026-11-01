@@ -862,3 +862,13 @@ export const updateGlobalLocalSkillFromCenter = (agent: string, skillRelativePat
 
 export const deleteGlobalLocalSkill = (agent: string, skillRelativePath: string) =>
   invoke<void>("delete_global_local_skill", { agent, skillRelativePath });
+
+export interface CatalogEntry {
+  source: string;
+  name: string;
+  category: string | null;
+  existing_id: string | null;
+  conflict: string | null;
+}
+export const importCatalog = (root: string, category: string | null, excluded: string[], selected: string[] | null = null) =>
+  invoke<CatalogEntry[]>("import_catalog", { root, category, excluded, selected });
